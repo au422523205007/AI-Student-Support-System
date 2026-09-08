@@ -1,0 +1,241 @@
+import re
+import math
+from collections import Counter
+from typing import List, Dict
+from langchain_core.tools import tool
+
+# ==========================================================
+# 1. ALIAS MAPPING LAYER (Slang, Acronyms & Synonyms)
+# ==========================================================
+ALIAS_MAP = {
+    # Grooming & Appearance
+    "beard": "grooming", "shave": "grooming", "mustache": "grooming",
+    "haircut": "grooming", "hair": "grooming", "trim": "grooming",
+    "jeans": "dress_code", "tshirt": "dress_code", "t-shirt": "dress_code",
+    "slippers": "dress_code", "sandals": "dress_code", "shoes": "dress_code",
+    "uniform": "dress_code", "formals": "dress_code", "casuals": "dress_code",
+    
+    # Leave, Permissions & OD
+    "od": "on_duty", "on-duty": "on_duty", "symposium": "on_duty",
+    "ml": "medical_leave", "sick": "medical_leave", "doctor": "medical_leave",
+    "medical": "medical_leave", "leave": "leave_rules",
+    
+    # Hostel & Movement
+    "outing": "hostel_leave", "gatepass": "hostel_leave", "gate-pass": "hostel_leave",
+    "nightout": "hostel_leave", "curfew": "hostel_rules", "warden": "hostel_rules",
+    "mess": "canteen", "food": "canteen", "dinner": "canteen", "lunch": "canteen",
+    
+    # Attendance & Academics
+    "bunk": "attendance", "absent": "attendance", "shortage": "attendance",
+    "condonation": "attendance", "percentage": "attendance", "hallticket": "examination",
+    "admitcard": "examination", "arrear": "examination", "arrears": "examination",
+    "coe": "examination", "reval": "examination", "revaluation": "examination",
+    
+    # Campus Administration & Transport
+    "ragging": "discipline", "harassment": "discipline", "phone": "discipline",
+    "mobile": "discipline", "camera": "discipline", "idcard": "campus_id",
+    "bonafide": "certificates", "tc": "certificates", "bus": "transport",
+    "bike": "transport", "parking": "transport", "placement": "careers",
+    "internship": "careers", "cgpa": "careers"
+}
+
+def resolve_aliases(text: str) -> str:
+    """Normalizes input terms, abbreviations, and slang into system-standard keywords."""
+    clean_text = re.sub(r'[^\w\s-]', '', text.lower())
+    tokens = clean_text.split()
+    mapped_tokens = [ALIAS_MAP.get(token, token) for token in tokens]
+    return " ".join(mapped_tokens)
+
+# ==========================================================
+# 2. EXPANDED CAMPUS POLICY REPOSITORY
+# ==========================================================
+COLLEGE_POLICIES = {
+    "academic_attendance": {
+        "title": "Academic Regulations & Attendance Policy",
+        "category": "academic",
+        "rules": [
+            "Attendance Rule: Minimum 75% attendance per subject is mandatory to sit for end-semester exams.",
+            "Condonation: Attendance between 65% and 74% requires Principal approval and condonation fee payment for medical validities.",
+            "Detention: Students having below 65% attendance will be detained and must repeat the semester."
+        ]
+    },
+    "dress_and_grooming": {
+        "title": "Student Dress Code & Grooming Standards",
+        "category": "grooming",
+        "rules": [
+            "Dress Code: Formal shirts tucked in with formal trousers and leather shoes are mandatory Monday to Thursday.",
+            "Prohibited Clothing: Round-neck T-shirts, ripped jeans, cargo pants, and rubber slippers/sandals are strictly forbidden.",
+            "Grooming & Haircut: Male students must maintain a short, neat haircut and clean-shaven or neatly trimmed facial hair.",
+            "ID Card Requirement: Official student ID must be worn visibly around the neck via lanyard at all times inside campus."
+        ]
+    },
+    "hostel_and_mess": {
+        "title": "Hostel Regulations, Curfew & Mess Timings",
+        "category": "hostel",
+        "rules": [
+            "Curfew Timing: Campus gates close strictly at 8:30 PM. Late entry is recorded and forwarded to HODs.",
+            "Hostel Leave & Outing: Gate passes for weekend outings and night-outs require warden approval 24 hours prior.",
+            "Mess Timings: Breakfast (7:30 - 8:45 AM), Lunch (12:30 - 1:45 PM), Dinner (7:30 - 9:00 PM). Food cannot be taken to dorm rooms."
+        ]
+    },
+    "leave_and_od": {
+        "title": "Leave Policy, Medical Leave (ML) & On-Duty (OD)",
+        "category": "leave",
+        "rules": [
+            "On-Duty (OD): Maximum 14 days of OD permitted per semester for approved symposiums, technical paper presentations, or sports.",
+            "Medical Leave (ML): Leave applications exceeding 3 consecutive days must include a valid doctor certificate and prescription upon return.",
+            "Prior Approval: All non-emergency leave must be sanctioned by the Class Advisor and HOD."
+        ]
+    },
+    "examination_and_coe": {
+        "title": "Controller of Examinations (CoE) Rules",
+        "category": "exam",
+        "rules": [
+            "Assessment Dates: Mid-term tests commence on October 15th. Lab examinations precede written tests.",
+            "Hall Tickets: Hall tickets must be shown alongside student ID. No entry permitted 30 minutes after commencement.",
+            "Malpractice: Bringing unauthorized notes, mobile phones, or smartwatches results in immediate course debarment."
+        ]
+    },
+    "discipline_and_safety": {
+        "title": "Campus Discipline & Anti-Ragging Policy",
+        "category": "discipline",
+        "rules": [
+            "Anti-Ragging: Zero-tolerance policy. Any form of ragging or harassment causes instant FIR filing and police handover.",
+            "Mobile Usage: Smartphones are prohibited in academic blocks and laboratories. Confiscated phones incur a penalty.",
+            "Transport & Parking: Two-wheeler parking requires a valid helmet and driving license. Day scholar buses depart at 5:00 PM."
+        ]
+    },
+    "placements_and_admin": {
+        "title": "Career Placements & Administrative Documentation",
+        "category": "admin",
+        "rules": [
+            "Placement Eligibility: Students must maintain minimum 60% (6.5 CGPA) with no standing arrears to participate in on-campus drives.",
+            "Certificates: Bonafide and Transfer Certificate (TC) applications take 48 working hours through the student admin portal."
+        ]
+    }
+}
+
+# ==========================================================
+# 3. VECTOR SIMILARITY ENGINE
+# ==========================================================
+def tokenize(text: str) -> List[str]:
+    # Keep words with length >= 2 to preserve 'od', 'ml', 'tc'
+    return [token for token in re.findall(r'\b\w+\b', text.lower()) if len(token) >= 2]
+
+def cosine_similarity(vec1: Counter, vec2: Counter) -> float:
+    intersection = set(vec1.keys()) & set(vec2.keys())
+    numerator = sum(vec1[x] * vec2[x] for x in intersection)
+    sum1 = sum(vec1[x] ** 2 for x in vec1.keys())
+    sum2 = sum(vec2[x] ** 2 for x in vec2.keys())
+    denominator = math.sqrt(sum1) * math.sqrt(sum2)
+    return float(numerator) / denominator if denominator else 0.0
+
+# ==========================================================
+# 4. TOOLS & AGENT ENGINE
+# ==========================================================
+@tool
+def search_college_handbook(query: str) -> str:
+    """Retrieves official guidelines, dress code, leave, hostel, exams, and discipline."""
+    normalized_query = resolve_aliases(query)
+    q_tokens = tokenize(normalized_query)
+    
+    # 1. Broad Policy Overview: Return primary regulations
+    if normalized_query.strip() in ["policy", "policies", "rules", "rule", "code of conduct"]:
+        sections = []
+        for key in ["academic_attendance", "dress_and_grooming", "hostel_and_mess", "leave_and_od"]:
+            sec = COLLEGE_POLICIES[key]
+            rules_str = "\n  * ".join(sec["rules"])
+            sections.append(f"[{sec['title']}]\n  * {rules_str}")
+        return "\n\n".join(sections)
+
+    # 2. Targeted Semantic Search using Cosine Similarity
+    q_vec = Counter(q_tokens)
+    scored_rules = []
+
+    for section in COLLEGE_POLICIES.values():
+        for rule in section["rules"]:
+            rule_vec = Counter(tokenize(rule))
+            score = cosine_similarity(q_vec, rule_vec)
+            
+            # Boost for category matches
+            if section["category"] in normalized_query:
+                score += 0.25
+                
+            if score > 0.08:
+                scored_rules.append((score, rule, section["title"]))
+
+    scored_rules.sort(key=lambda x: x[0], reverse=True)
+
+    if scored_rules:
+        # Return the top matches
+        top_matches = [f"[{item[2]}] {item[1]}" for item in scored_rules[:3]]
+        return "\n\n".join(top_matches)
+
+    return "No official records found matching your inquiry. Please consult the admin desk."
+
+@tool
+def check_attendance_status(attended: int, total: int) -> str:
+    """Calculates attendance percentage and verifies examination eligibility."""
+    if total <= 0:
+        return "Total scheduled classes must be greater than zero."
+    
+    pct = round((attended / total) * 100, 2)
+    if pct >= 75.0:
+        status = "ELIGIBLE (Clear to sit for exams)"
+    elif pct >= 65.0:
+        status = "CONDONATION REQUIRED (Requires Principal Medical Approval)"
+    else:
+        status = "DETAINED (Below 65% - Mandatory Re-enrollment)"
+        
+    return f"Calculated Attendance: {pct}%. Status: {status}."
+
+class StudentSupportAgent:
+    def route_and_execute(self, user_query: str) -> str:
+        lower_q = user_query.lower()
+        normalized_q = resolve_aliases(lower_q)
+        
+        # Tool Route 1: Numerical Attendance Evaluation
+        if any(char.isdigit() for char in lower_q) and any(w in normalized_q for w in ["attendance", "class", "present"]):
+            numbers = [int(s) for s in lower_q.replace("/", " ").replace("out of", " ").split() if s.isdigit()]
+            if len(numbers) >= 2:
+                attended, total = numbers[0], numbers[1]
+                calc_result = check_attendance_status.invoke({"attended": attended, "total": total})
+                policy_context = search_college_handbook.invoke("attendance rules")
+                return f"{calc_result}\n\n[Reference Policy]:\n{policy_context}"
+
+        # Conversational greetings
+        if lower_q in ["hi", "hello", "hey", "help"]:
+            return (
+                "Hello! I am your AI Student Support Assistant.\n"
+                "You can ask about: Dress code, Beard/Haircut rules, Hostel curfew, "
+                "Mess timings, OD/Medical Leave, Exams, Anti-Ragging, or calculate attendance."
+            )
+
+        # Tool Route 2: Knowledge Retrieval via Normalized Alias Mapping
+        return search_college_handbook.invoke(user_query)
+
+# ==========================================================
+# 5. INTERACTIVE CLI RUNNER
+# ==========================================================
+if __name__ == "__main__":
+    agent = StudentSupportAgent()
+      
+    print("=" * 65)
+    print(" AI STUDENT SUPPORT ASSISTANT (Comprehensive Policy Engine)")
+    print(" Type 'exit' to quit.")
+    print("=" * 65)
+    
+    while True:
+        try:
+            user_input = input("\nYou: ").strip()
+            if not user_input:
+                continue
+            if user_input.lower() in ["exit", "quit", "q"]:
+                print("\nAssistant: Session terminated.")
+                break
+                
+            reply = agent.route_and_execute(user_input)
+            print(f"\nAssistant:\n{reply}")
+            
+        except (KeyboardInterrupt, EOFError):
+            break
